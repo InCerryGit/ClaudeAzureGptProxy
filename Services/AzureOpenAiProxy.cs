@@ -622,7 +622,12 @@ public sealed class AzureOpenAiProxy
             ? callIdObj?.ToString()
             : message.TryGetValue("call_id", out var altCallIdObj)
                 ? altCallIdObj?.ToString()
-                : lastFunctionCallId;
+                : null;
+
+        if (string.IsNullOrWhiteSpace(callId))
+        {
+            throw new InvalidOperationException("Tool output is missing tool_call_id/call_id; cannot safely associate tool output with a prior tool call.");
+        }
         var output = message.TryGetValue("content", out var contentObj)
             ? NormalizeToolOutput(contentObj)
             : string.Empty;

@@ -55,7 +55,7 @@ public static class AnthropicConversion
         return null;
     }
 
-    private static string StripProviderPrefix(string model)
+    internal static string StripProviderPrefix(string model)
     {
         if (model.StartsWith("anthropic/", StringComparison.OrdinalIgnoreCase))
         {
@@ -804,6 +804,9 @@ public static class AnthropicConversion
         {
             "length" => "max_tokens",
             "tool_calls" => "tool_use",
+            "stop" => "end_turn",
+            "content_filter" => "content_filter",
+            "cancelled" => "cancelled",
             _ => "end_turn"
         };
     }

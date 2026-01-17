@@ -3,7 +3,7 @@
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 项目简介
-这是python的移植版本，原始的python版本位于 old目录下。用于代理Anthropic Claude Code API请求到Azure OpenAI服务，支持流式响应与工具调用。只实现了Azure OpenAI的chat/completions端点，转换请求与响应格式以兼容Anthropic的Messages API。因为其余暂时不需要，所以没有实现。
+用于代理Anthropic Claude Code API请求到Azure OpenAI服务，支持流式响应与工具调用。只实现了Azure OpenAI的chat/completions端点，转换请求与响应格式以兼容Anthropic的Messages API。因为其余暂时不需要，所以没有实现。
 
 ## 常用命令（Windows）
 

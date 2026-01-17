@@ -8,6 +8,7 @@ namespace ClaudeAzureGptProxy.Services;
 
 public static class SseStreaming
 {
+    private static readonly Dictionary<int, int> _toolIndexToAnthropicIndex = new();
     public sealed class StreamStats
     {
         public int ChunkCount { get; set; }
@@ -100,6 +101,9 @@ public static class SseStreaming
         {
             "length" => "max_tokens",
             "tool_calls" => "tool_use",
+            "stop" => "end_turn",
+            "content_filter" => "content_filter",
+            "cancelled" => "cancelled",
             _ => "end_turn"
         };
     }
@@ -111,7 +115,7 @@ public static class SseStreaming
         StreamStats? stats = null)
     {
         var messageId = $"msg_{Guid.NewGuid():N}";
-        var responseModel = originalRequest.OriginalModel ?? originalRequest.Model;
+        var responseModel = AnthropicConversion.StripProviderPrefix(originalRequest.OriginalModel ?? originalRequest.Model);
 
         logger.LogInformation("Streaming start messageId={MessageId} model={Model}", messageId, responseModel);
 
@@ -120,6 +124,7 @@ public static class SseStreaming
         // we already know usage before sending message_start; for regular streams usage is typically unknown.
         await using var enumerator = responseStream.GetAsyncEnumerator();
 
+        _toolIndexToAnthropicIndex.Clear();
         int? toolIndex = null;
         var accumulatedText = string.Empty;
         var textSent = false;
@@ -650,39 +655,55 @@ public static class SseStreaming
         }
 
         var createdEvents = new List<string>();
-        int? anthropicToolIndex = null;
 
-        if (toolIndex is null || currentIndex != toolIndex)
+        // Anthropic expects that tool_use input_json_delta uses the same content block index
+        // across multiple chunks. We map each OpenAI tool call index -> Anthropic content block index.
+        // This avoids only emitting the first partial args chunk.
+        if (_toolIndexToAnthropicIndex.TryGetValue(currentIndex, out var existingAnthropicIndex))
         {
+            // Keep toolIndex pointing at the most recently seen tool index.
             toolIndex = currentIndex;
-            lastToolIndex += 1;
-            anthropicToolIndex = lastToolIndex;
 
-            var function = ExtractField(toolCall, "function");
-            var name = ExtractString(function, "name") ?? string.Empty;
-            var toolId = ExtractString(toolCall, "id") ?? $"toolu_{Guid.NewGuid():N}";
-
-            createdEvents.Add(EmitContentBlockStart(anthropicToolIndex.Value, new
+            var argumentsRawExisting = ExtractField(ExtractField(toolCall, "function"), "arguments");
+            if (argumentsRawExisting is not null)
             {
-                type = "tool_use",
-                id = toolId,
-                name,
-                input = new Dictionary<string, object?>()
-            }));
+                var argsJsonExisting = NormalizeArguments(argumentsRawExisting);
+                createdEvents.Add(EmitContentBlockDelta(existingAnthropicIndex, new
+                {
+                    type = "input_json_delta",
+                    partial_json = argsJsonExisting
+                }));
+            }
+
+            return (toolIndex, lastToolIndex, createdEvents);
         }
+
+        toolIndex = currentIndex;
+        lastToolIndex += 1;
+        var anthropicToolIndex = lastToolIndex;
+        _toolIndexToAnthropicIndex[currentIndex] = anthropicToolIndex;
+
+        var function = ExtractField(toolCall, "function");
+        var name = ExtractString(function, "name") ?? string.Empty;
+        var toolId = ExtractString(toolCall, "id") ?? $"toolu_{Guid.NewGuid():N}";
+
+        createdEvents.Add(EmitContentBlockStart(anthropicToolIndex, new
+        {
+            type = "tool_use",
+            id = toolId,
+            name,
+            input = new Dictionary<string, object?>()
+        }));
 
         var argumentsRaw = ExtractField(ExtractField(toolCall, "function"), "arguments");
         if (argumentsRaw is not null)
         {
             var argsJson = NormalizeArguments(argumentsRaw);
-            if (anthropicToolIndex is not null)
+            createdEvents.Add(EmitContentBlockDelta(anthropicToolIndex, new
             {
-                createdEvents.Add(EmitContentBlockDelta(anthropicToolIndex.Value, new
-                {
-                    type = "input_json_delta",
-                    partial_json = argsJson
-                }));
-            }
+                type = "input_json_delta",
+                partial_json = argsJson
+            }));
         }
 
         return (toolIndex, lastToolIndex, createdEvents);
