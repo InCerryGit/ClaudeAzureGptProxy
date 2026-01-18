@@ -1833,9 +1833,12 @@ public sealed class AzureOpenAiProxy
 
         if (partDict.TryGetValue("image_url", out var imageUrlObj))
         {
-            imagePart["type"] = "input_image";
-            imagePart["image_url"] = imageUrlObj;
-            return true;
+            if (TryExtractImageUrlString(imageUrlObj, out var extractedUrl))
+            {
+                imagePart["type"] = "input_image";
+                imagePart["image_url"] = extractedUrl;
+                return true;
+            }
         }
 
         if (partDict.TryGetValue("source", out var sourceObj) && sourceObj is not null)
@@ -1843,12 +1846,74 @@ public sealed class AzureOpenAiProxy
             if (TryBuildImageUrl(sourceObj, out var imageUrl))
             {
                 imagePart["type"] = "input_image";
-                imagePart["image_url"] = new Dictionary<string, object?>
-                {
-                    ["url"] = imageUrl
-                };
+                imagePart["image_url"] = imageUrl;
                 return true;
             }
+        }
+
+        return false;
+    }
+
+    private static bool TryExtractImageUrlString(object? imageUrlObj, out string imageUrl)
+    {
+        imageUrl = string.Empty;
+
+        if (imageUrlObj is null)
+        {
+            return false;
+        }
+
+        if (imageUrlObj is string urlString)
+        {
+            if (string.IsNullOrWhiteSpace(urlString))
+            {
+                return false;
+            }
+
+            imageUrl = urlString;
+            return true;
+        }
+
+        if (imageUrlObj is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.String)
+            {
+                var url = element.GetString();
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    return false;
+                }
+
+                imageUrl = url;
+                return true;
+            }
+
+            if (element.ValueKind == JsonValueKind.Object &&
+                element.TryGetProperty("url", out var urlProp) &&
+                urlProp.ValueKind == JsonValueKind.String)
+            {
+                var url = urlProp.GetString();
+                if (string.IsNullOrWhiteSpace(url))
+                {
+                    return false;
+                }
+
+                imageUrl = url;
+                return true;
+            }
+
+            return false;
+        }
+
+        if (imageUrlObj is IDictionary<string, object?> dict)
+        {
+            if (dict.TryGetValue("url", out var urlObj) && TryExtractImageUrlString(urlObj, out var nestedUrl))
+            {
+                imageUrl = nestedUrl;
+                return true;
+            }
+
+            return false;
         }
 
         return false;
