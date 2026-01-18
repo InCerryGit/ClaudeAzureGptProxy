@@ -1,8 +1,8 @@
 using System.Diagnostics;
 using System.Text.Json;
-using ClaudeAzureGptProxy.Infrastructure;
-using ClaudeAzureGptProxy.Models;
-using ClaudeAzureGptProxy.Services;
+using AzureGptProxy.Infrastructure;
+using AzureGptProxy.Models;
+using AzureGptProxy.Services;
 using Microsoft.Extensions.DependencyInjection;
 using Serilog;
 using Serilog.Events;

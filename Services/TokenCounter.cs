@@ -1,9 +1,9 @@
 using System.Text.Json;
-using ClaudeAzureGptProxy.Models;
+using AzureGptProxy.Models;
 using Microsoft.Extensions.Logging;
 using SharpToken;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public sealed class TokenCounter
 {

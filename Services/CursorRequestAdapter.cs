@@ -1,8 +1,8 @@
 using System.Text.Json;
-using ClaudeAzureGptProxy.Infrastructure;
-using ClaudeAzureGptProxy.Models;
+using AzureGptProxy.Infrastructure;
+using AzureGptProxy.Models;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public static class CursorRequestAdapter
 {
@@ -83,6 +83,11 @@ public static class CursorRequestAdapter
     private static (JsonElement Input, string Instructions) MessagesToResponsesInputAndInstructions(List<OpenAiChatMessage> messages)
     {
         var instructionsParts = new List<string>();
+        // Cursor in agent mode may send role=tool messages without tool_call_id.
+        // If the upstream model cannot correlate tool outputs to prior function_call items,
+        // it may repeat the same tool calls and trigger Cursor's "model looping" detector.
+        // Track the pending tool call ids (in order) so we can infer call_id when missing.
+        var pendingToolCallIds = new List<string>();
 
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
@@ -111,9 +116,26 @@ public static class CursorRequestAdapter
                     writer.WriteStartObject();
                     writer.WriteString("type", "function_call_output");
                     writer.WriteString("status", "completed");
-                    if (!string.IsNullOrWhiteSpace(m.ToolCallId))
+
+                    var callId = m.ToolCallId;
+                    if (string.IsNullOrWhiteSpace(callId) && pendingToolCallIds.Count > 0)
                     {
-                        writer.WriteString("call_id", m.ToolCallId);
+                        callId = pendingToolCallIds[0];
+                        pendingToolCallIds.RemoveAt(0);
+                    }
+                    else if (!string.IsNullOrWhiteSpace(callId) && pendingToolCallIds.Count > 0)
+                    {
+                        // Keep pending list consistent even when tool_call_id is present.
+                        var idx = pendingToolCallIds.FindIndex(id => string.Equals(id, callId, StringComparison.Ordinal));
+                        if (idx >= 0)
+                        {
+                            pendingToolCallIds.RemoveAt(idx);
+                        }
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(callId))
+                    {
+                        writer.WriteString("call_id", callId);
                     }
 
                     writer.WritePropertyName("output");
@@ -136,6 +158,11 @@ public static class CursorRequestAdapter
                 {
                     foreach (var tc in m.ToolCalls)
                     {
+                        if (!string.IsNullOrWhiteSpace(tc.Id))
+                        {
+                            pendingToolCallIds.Add(tc.Id);
+                        }
+
                         writer.WriteStartObject();
                         writer.WriteString("type", "function_call");
                         writer.WriteString("call_id", tc.Id);

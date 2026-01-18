@@ -1,7 +1,7 @@
-# Claude Code Azure GPT Proxy ([English](./README.md))
+# AzureGptProxy ([English](./README.md))
 
 > **简要说明**
-> 该项目用于将 Anthropic Claude Code 的 Messages API 请求代理到 Azure OpenAI `chat/completions` 端点，并在响应侧转换回 Anthropic 兼容格式（支持 SSE 流式响应与工具调用）。
+> 该项目用于将 Anthropic Claude Code 的 Messages API 请求代理到 Azure OpenAI `chat/completions` 端点，并在响应侧转换回 Anthropic 兼容格式（支持 SSE 流式响应与工具调用）。同时支持 Cursor 代理接入，基于 Cursor-Azure-GPT-5 项目。
 
 ---
 
@@ -12,6 +12,22 @@
 - **SSE 流式支持**：支持 `message_start / content_block_delta / message_stop` 事件流
 - **Tool 调用支持**：支持 tool_use / tool_result
 - **Token 统计支持**：支持 `/v1/messages/count_tokens` 本地估算
+- **Cursor 代理**：可作为 Cursor 代理接入（基于 Cursor-Azure-GPT-5）
+
+---
+
+## 🧭 Cursor 配置
+
+> 本代理参考 Cursor-Azure-GPT-5 的配置方式。
+
+1. 将服务暴露到公网（Cursor 需要公网可访问 URL），可以直接发布或使用 Cloudflare Tunnel。
+2. 在 Cursor 设置 > Models > API Keys 中：
+   - **OpenAI Base URL** 填入你的公网地址（例如 `https://your-domain.example.com`）。
+   - **OpenAI API Key** 填入 `ANTHROPIC_AUTH_TOKEN` 的值（若未启用鉴权可留空）。
+3. 新建自定义模型：`gpt-high`、`gpt-medium`、`gpt-low`（可选：`gpt-minimal`）。
+4. 在 Cursor 中选择这些模型即可使用本代理。
+
+更多细节参考 Cursor-Azure-GPT-5：https://github.com/gabrii/Cursor-Azure-GPT-5
 
 ---
 
@@ -43,7 +59,7 @@ copy .env.sample .env
 ### 1. 构建镜像
 
 ```bash
-docker build -t claude-azure-gpt-proxy:latest .
+docker build -t azuregptproxy:latest .
 ```
 
 ### 2. 准备环境变量
@@ -58,10 +74,10 @@ copy .env.sample .env
 
 ```bash
 # 删除同名旧容器（如果存在）
-docker rm -f claude-azure-gpt-proxy
+docker rm -f azuregptproxy
 
 # 启动
-docker run -d --name claude-azure-gpt-proxy --env-file .env -p 8088:8080 claude-azure-gpt-proxy:latest
+docker run -d --name azuregptproxy --env-file .env -p 8088:8080 azuregptproxy:latest
 ```
 
 ---

@@ -1,7 +1,7 @@
 using System.Text;
 using System.Text.Json;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public sealed class CursorResponseAdapter
 {

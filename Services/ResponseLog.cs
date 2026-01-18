@@ -1,8 +1,8 @@
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using ClaudeAzureGptProxy.Models;
+using AzureGptProxy.Models;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public sealed class ResponseLog
 {

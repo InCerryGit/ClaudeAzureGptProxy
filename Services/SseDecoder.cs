@@ -1,6 +1,6 @@
 using System.Text;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public sealed class SseDecoder
 {

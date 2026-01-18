@@ -1,6 +1,6 @@
 using System.Text.Json;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public static class OpenAiSseEncoder
 {

@@ -2,11 +2,11 @@ using System.Linq;
 using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
-using ClaudeAzureGptProxy.Models;
+using AzureGptProxy.Models;
 using Microsoft.Extensions.Logging;
 using OpenAI.Chat;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public static class SseStreaming
 {

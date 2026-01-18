@@ -1,9 +1,9 @@
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
-using ClaudeAzureGptProxy.Infrastructure;
+using AzureGptProxy.Infrastructure;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public sealed class CursorAzureResponsesProxy
 {

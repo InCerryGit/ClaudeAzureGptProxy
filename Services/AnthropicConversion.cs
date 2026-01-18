@@ -1,10 +1,10 @@
 using System.Text.Json;
 using System.Linq;
-using ClaudeAzureGptProxy.Infrastructure;
-using ClaudeAzureGptProxy.Models;
+using AzureGptProxy.Models;
+using AzureGptProxy.Infrastructure;
 using Microsoft.Extensions.Logging;
 
-namespace ClaudeAzureGptProxy.Services;
+namespace AzureGptProxy.Services;
 
 public static class AnthropicConversion
 {

@@ -1,7 +1,7 @@
 using Microsoft.AspNetCore.WebUtilities;
 using Microsoft.Extensions.Options;
 
-namespace ClaudeAzureGptProxy.Infrastructure;
+namespace AzureGptProxy.Infrastructure;
 
 public sealed class AzureOpenAiOptions
 {
