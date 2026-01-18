@@ -183,6 +183,7 @@ static async Task<IResult> HandleCursorChatCompletions(
     // 生产环境将 Logging:LogLevel:Default / Microsoft.AspNetCore 提高即可自动关闭。
     if (logger.IsEnabled(LogLevel.Debug))
     {
+        logger.LogDebug("cursor_raw_request {Request}", JsonSerializer.Serialize(request));
         logger.LogDebug(
             "cursor_request model={Model} messages={MessageCount} tools={ToolCount} tool_choice_present={HasToolChoice} user_present={HasUser}",
             request.Model,
