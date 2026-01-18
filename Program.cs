@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using ClaudeAzureGptProxy.Infrastructure;
 using ClaudeAzureGptProxy.Models;
 using ClaudeAzureGptProxy.Services;
@@ -11,7 +12,9 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddOpenApi();
 builder.Services.AddAzureOpenAiConfig(builder.Configuration);
 builder.Services.AddSingleton<AzureOpenAiClientFactory>();
+builder.Services.AddHttpClient();
 builder.Services.AddSingleton<AzureOpenAiProxy>();
+builder.Services.AddSingleton<CursorAzureResponsesProxy>();
 builder.Services.AddSingleton<TokenCounter>();
 builder.Services.AddSingleton<ResponseLog>();
 
@@ -79,7 +82,11 @@ app.Lifetime.ApplicationStarted.Register(() =>
 
 app.Use(async (context, next) =>
 {
-    if (context.Request.Path.StartsWithSegments("/v1/messages", StringComparison.OrdinalIgnoreCase))
+    var requiresAuth = context.Request.Path.StartsWithSegments("/v1/messages", StringComparison.OrdinalIgnoreCase)
+                       || (context.Request.Path.StartsWithSegments("/cursor", StringComparison.OrdinalIgnoreCase)
+                           && !context.Request.Path.StartsWithSegments("/cursor/health", StringComparison.OrdinalIgnoreCase));
+
+    if (requiresAuth)
     {
         var azureOptions = context.RequestServices.GetRequiredService<NormalizedAzureOpenAiOptions>();
         var logger = context.RequestServices.GetRequiredService<ILogger<Program>>();
@@ -112,10 +119,97 @@ app.Use(async (context, next) =>
             }
         }
     }
+
     await next();
 });
 
+app.MapGet("/cursor/health", () => Results.Json(new { status = "ok" }));
+
+app.MapGet("/cursor/models", () =>
+{
+    var models = new[] { "gpt-high", "gpt-medium", "gpt-low", "gpt-minimal" };
+    var response = new
+    {
+        @object = "list",
+        data = models.Select(id => new { id, @object = "model", created = 0, owned_by = "cursor" }).ToArray()
+    };
+    return Results.Json(response);
+});
+
+app.MapGet("/cursor/v1/models", () =>
+{
+    var models = new[] { "gpt-high", "gpt-medium", "gpt-low", "gpt-minimal" };
+    var response = new
+    {
+        @object = "list",
+        data = models.Select(id => new { id, @object = "model", created = 0, owned_by = "cursor" }).ToArray()
+    };
+    return Results.Json(response);
+});
+
+app.MapPost("/cursor/chat/completions", HandleCursorChatCompletions);
+app.MapPost("/cursor/v1/chat/completions", HandleCursorChatCompletions);
+
+
 app.MapGet("/", () => Results.Json(new { message = "Anthropic Proxy for Azure OpenAI" }));
+
+static async Task<IResult> HandleCursorChatCompletions(
+    OpenAiChatCompletionsRequest request,
+    CursorAzureResponsesProxy proxy,
+    NormalizedAzureOpenAiOptions azureOptions,
+    HttpResponse response,
+    ILogger<Program> logger,
+    CancellationToken cancellationToken)
+{
+    // python 行为：强制流式
+    response.StatusCode = StatusCodes.Status200OK;
+    response.ContentType = "text/event-stream";
+
+    (JsonDocument responsesBody, string inboundModel) built;
+
+    try
+    {
+        built = CursorRequestAdapter.BuildResponsesRequest(request, azureOptions);
+    }
+    catch (ArgumentException ex)
+    {
+        return Results.Problem(detail: ex.Message, statusCode: StatusCodes.Status400BadRequest, title: "Bad Request");
+    }
+
+    using var responsesBody = built.responsesBody;
+    var inboundModel = built.inboundModel;
+
+    await using var azureStream = await proxy.SendStreamingAsync(responsesBody, cancellationToken);
+    var adapter = new CursorResponseAdapter(inboundModel);
+    var decoder = new SseDecoder();
+
+    using var reader = new StreamReader(azureStream);
+    while (!cancellationToken.IsCancellationRequested)
+    {
+        var line = await reader.ReadLineAsync(cancellationToken);
+        if (line is null)
+        {
+            break;
+        }
+
+        foreach (var data in decoder.PushLine(line))
+        {
+            foreach (var sse in adapter.ConvertAzureSseDataToOpenAiSse(data))
+            {
+                await response.WriteAsync(sse, cancellationToken);
+                await response.Body.FlushAsync(cancellationToken);
+            }
+        }
+    }
+
+    // 兜底：确保以 [DONE] 结束（如果 Azure 没发 response.completed）
+    await response.WriteAsync(OpenAiSseEncoder.Done(), cancellationToken);
+    await response.Body.FlushAsync(cancellationToken);
+
+    logger.LogInformation("/cursor/chat/completions stream finished inboundModel={InboundModel}", inboundModel);
+    return Results.Empty;
+}
+
 
 app.MapPost("/v1/messages", async (
     MessagesRequest request,
@@ -233,6 +327,7 @@ app.MapPost("/v1/messages/count_tokens", (
     request.ResolvedAzureModel = AnthropicConversion.ResolveAzureModel(request, azureOptions);
 
     var inputTokens = tokenCounter.CountInputTokens(request);
+    logger.LogDebug("/v1/messages/count_tokens raw request {Request}", JsonSerializer.Serialize(request));
     logger.LogInformation("/v1/messages/count_tokens request for model {Model} resolved {ResolvedModel} input_tokens={InputTokens}",
         request.Model,
         request.ResolvedAzureModel ?? request.Model,

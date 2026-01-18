@@ -71,11 +71,11 @@ public sealed class ResponseLog
     {
         try
         {
-            _logger.LogDebug(
-                "event_type=azure_stream_chunk route={Route} chunk_index={ChunkIndex} azure_chunk_json={AzureChunkJson}",
-                "/v1/messages",
-                chunkIndex,
-                ToJson(chunk));
+            // _logger.LogDebug(
+            //     "event_type=azure_stream_chunk route={Route} chunk_index={ChunkIndex} azure_chunk_json={AzureChunkJson}",
+            //     "/v1/messages",
+            //     chunkIndex,
+            //     ToJson(chunk));
         }
         catch (Exception ex)
         {
@@ -102,11 +102,11 @@ public sealed class ResponseLog
     {
         try
         {
-            _logger.LogDebug(
-                "event_type=anthropic_sse_event route={Route} sse_event_index={EventIndex} sse_event_raw_single_line={SseEventRawSingleLine}",
-                "/v1/messages",
-                eventIndex,
-                ToSingleLine(sseEventRaw));
+            // _logger.LogDebug(
+            //     "event_type=anthropic_sse_event route={Route} sse_event_index={EventIndex} sse_event_raw_single_line={SseEventRawSingleLine}",
+            //     "/v1/messages",
+            //     eventIndex,
+            //     ToSingleLine(sseEventRaw));
         }
         catch (Exception ex)
         {

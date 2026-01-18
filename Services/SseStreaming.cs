@@ -1,4 +1,5 @@
 using System.Linq;
+using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using ClaudeAzureGptProxy.Models;
@@ -21,6 +22,13 @@ public static class SseStreaming
         public MessagesResponse? AggregatedResponse { get; set; }
     }
 
+    private sealed class ToolUseAggregate
+    {
+        public required string Id { get; init; }
+        public required string Name { get; init; }
+        public StringBuilder Arguments { get; } = new();
+    }
+
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
@@ -36,6 +44,7 @@ public static class SseStreaming
         string responseModel,
         string accumulatedText,
         Dictionary<string, int> toolKeyToAnthropicIndex,
+        Dictionary<int, ToolUseAggregate> toolAggregates,
         int inputTokens,
         int outputTokens,
         string? stopReason)
@@ -54,13 +63,27 @@ public static class SseStreaming
         var maxToolIndex = toolKeyToAnthropicIndex.Count == 0 ? 0 : toolKeyToAnthropicIndex.Values.Max();
         for (var i = 1; i <= maxToolIndex; i++)
         {
-            content.Add(new Dictionary<string, object?>
+            if (toolAggregates.TryGetValue(i, out var aggregate))
             {
-                ["type"] = "tool_use",
-                ["id"] = string.Empty,
-                ["name"] = string.Empty,
-                ["input"] = new Dictionary<string, object?>()
-            });
+                var input = ParseToolInputJson(aggregate.Arguments.ToString());
+                content.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "tool_use",
+                    ["id"] = aggregate.Id,
+                    ["name"] = aggregate.Name,
+                    ["input"] = input
+                });
+            }
+            else
+            {
+                content.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "tool_use",
+                    ["id"] = string.Empty,
+                    ["name"] = string.Empty,
+                    ["input"] = new Dictionary<string, object?>()
+                });
+            }
         }
 
         return new MessagesResponse
@@ -185,6 +208,7 @@ public static class SseStreaming
         // Per-stream mapping: OpenAI tool call (id preferred, else index) -> Anthropic content block index.
         // This must be per request; any shared/static map will break concurrent streams.
         var toolKeyToAnthropicIndex = new Dictionary<string, int>(StringComparer.Ordinal);
+        var toolAggregates = new Dictionary<int, ToolUseAggregate>();
         var unknownToolKeySeq = 0;
         int? toolIndex = null;
         var accumulatedText = string.Empty;
@@ -266,6 +290,7 @@ public static class SseStreaming
                     ref hasSentStopReason,
                     ref lastToolIndex,
                     toolKeyToAnthropicIndex,
+                    toolAggregates,
                     ref unknownToolKeySeq,
                     stats);
             }
@@ -316,6 +341,7 @@ public static class SseStreaming
                     ref hasSentStopReason,
                     ref lastToolIndex,
                     toolKeyToAnthropicIndex,
+                    toolAggregates,
                     ref unknownToolKeySeq,
                     stats);
             }
@@ -362,7 +388,7 @@ public static class SseStreaming
             stats.InputTokens = inputTokens;
             stats.OutputTokens = outputTokens;
             stats.StopReason = "end_turn";
-            stats.AggregatedResponse = BuildAggregatedResponse(messageId, responseModel, accumulatedText, toolKeyToAnthropicIndex, inputTokens, outputTokens, stats.StopReason);
+            stats.AggregatedResponse = BuildAggregatedResponse(messageId, responseModel, accumulatedText, toolKeyToAnthropicIndex, toolAggregates, inputTokens, outputTokens, stats.StopReason);
 
             logger.LogInformation(
                 "Streaming ended without finish_reason messageId={MessageId} inputTokens={InputTokens} outputTokens={OutputTokens} chunks={ChunkCount} events={EventCount}",
@@ -599,6 +625,7 @@ public static class SseStreaming
         ref bool hasSentStopReason,
         ref int lastToolIndex,
         Dictionary<string, int> toolKeyToAnthropicIndex,
+        Dictionary<int, ToolUseAggregate> toolAggregates,
         ref int unknownToolKeySeq,
         StreamStats stats)
     {
@@ -653,7 +680,7 @@ public static class SseStreaming
             foreach (var toolCall in toolCalls)
             {
                 var (newToolIndex, newLastToolIndex, createdEvents) = HandleToolDelta(
-                    toolCall, toolIndex, lastToolIndex, toolKeyToAnthropicIndex, ref unknownToolKeySeq);
+                    toolCall, toolIndex, lastToolIndex, toolKeyToAnthropicIndex, toolAggregates, ref unknownToolKeySeq);
                 toolIndex = newToolIndex;
                 lastToolIndex = newLastToolIndex;
                 events.AddRange(createdEvents);
@@ -667,7 +694,7 @@ public static class SseStreaming
 
             var stopReason = MapStopReason(finishReason);
             stats.StopReason = stopReason;
-            stats.AggregatedResponse = BuildAggregatedResponse(messageId, responseModel, accumulatedText, toolKeyToAnthropicIndex, inputTokens, outputTokens, stopReason);
+            stats.AggregatedResponse = BuildAggregatedResponse(messageId, responseModel, accumulatedText, toolKeyToAnthropicIndex, toolAggregates, inputTokens, outputTokens, stopReason);
             events.Add(EmitMessageDelta(stopReason, outputTokens));
             events.Add(EmitMessageStop());
             events.Add("data: [DONE]\n\n");
@@ -733,6 +760,7 @@ public static class SseStreaming
         int? toolIndex,
         int lastToolIndex,
         Dictionary<string, int> toolKeyToAnthropicIndex,
+        Dictionary<int, ToolUseAggregate> toolAggregates,
         ref int unknownToolKeySeq)
     {
         var toolId = ExtractString(toolCall, "id");
@@ -780,6 +808,10 @@ public static class SseStreaming
             if (argumentsRawExisting is not null)
             {
                 var argsJsonExisting = NormalizeArguments(argumentsRawExisting);
+                if (toolAggregates.TryGetValue(existingAnthropicIndex, out var aggregate))
+                {
+                    aggregate.Arguments.Append(argsJsonExisting);
+                }
                 createdEvents.Add(EmitContentBlockDelta(existingAnthropicIndex, new
                 {
                     type = "input_json_delta",
@@ -799,6 +831,12 @@ public static class SseStreaming
         var name = ExtractString(function, "name") ?? string.Empty;
         var stableToolId = ExtractString(toolCall, "id") ?? $"toolu_{Guid.NewGuid():N}";
 
+        toolAggregates[anthropicToolIndex] = new ToolUseAggregate
+        {
+            Id = stableToolId,
+            Name = name
+        };
+
         createdEvents.Add(EmitContentBlockStart(anthropicToolIndex, new
         {
             type = "tool_use",
@@ -811,6 +849,7 @@ public static class SseStreaming
         if (argumentsRaw is not null)
         {
             var argsJson = NormalizeArguments(argumentsRaw);
+            toolAggregates[anthropicToolIndex].Arguments.Append(argsJson);
             createdEvents.Add(EmitContentBlockDelta(anthropicToolIndex, new
             {
                 type = "input_json_delta",
@@ -819,6 +858,23 @@ public static class SseStreaming
         }
 
         return (toolIndex, lastToolIndex, createdEvents);
+    }
+
+    private static object ParseToolInputJson(string? rawJson)
+    {
+        if (string.IsNullOrWhiteSpace(rawJson))
+        {
+            return new Dictionary<string, object?>();
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<object>(rawJson) ?? new Dictionary<string, object?>();
+        }
+        catch (JsonException)
+        {
+            return new Dictionary<string, object?> { ["raw"] = rawJson };
+        }
     }
 
     private static object? ExtractField(object? obj, string name)

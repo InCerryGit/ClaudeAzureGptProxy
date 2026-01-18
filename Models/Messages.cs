@@ -1,3 +1,4 @@
+using System.Text.Json;
 using System.Text.Json.Serialization;
 
 namespace ClaudeAzureGptProxy.Models;
@@ -43,6 +44,9 @@ public sealed record ContentBlockToolResult
     [JsonPropertyName("tool_use_id")]
     public string ToolUseId { get; init; } = string.Empty;
 
+    [JsonPropertyName("is_error")]
+    public bool? IsError { get; init; }
+
     [JsonPropertyName("content")]
     public object? Content { get; init; }
 }
@@ -67,6 +71,9 @@ public sealed record Message
 
 public sealed record Tool
 {
+    [JsonPropertyName("type")]
+    public string? Type { get; init; } = "function";
+
     [JsonPropertyName("name")]
     public string Name { get; init; } = string.Empty;
 
@@ -75,6 +82,9 @@ public sealed record Tool
 
     [JsonPropertyName("input_schema")]
     public Dictionary<string, object?> InputSchema { get; init; } = new();
+
+    [JsonExtensionData]
+    public Dictionary<string, JsonElement>? AdditionalProperties { get; init; }
 }
 
 public sealed record ToolChoice
@@ -84,12 +94,35 @@ public sealed record ToolChoice
 
     [JsonPropertyName("name")]
     public string? Name { get; init; }
+
+    // Anthropic supports disabling parallel tool use in tool_choice objects.
+    // We keep it optional for backward compatibility.
+    [JsonPropertyName("disable_parallel_tool_use")]
+    public bool? DisableParallelToolUse { get; init; }
 }
 
 public sealed record ThinkingConfig
 {
+    // Official Anthropic shape: {"type":"enabled","budget_tokens":1234} or {"type":"disabled"}
+    [JsonPropertyName("type")]
+    public string? Type { get; init; }
+
+    [JsonPropertyName("budget_tokens")]
+    public int? BudgetTokens { get; init; }
+
+    // Back-compat with older clients that send {"enabled": true/false}
     [JsonPropertyName("enabled")]
-    public bool Enabled { get; init; } = true;
+    public bool? Enabled { get; init; }
+
+    public bool IsEnabled()
+    {
+        if (!string.IsNullOrWhiteSpace(Type))
+        {
+            return string.Equals(Type, "enabled", StringComparison.OrdinalIgnoreCase);
+        }
+
+        return Enabled == true;
+    }
 }
 
 public sealed record MessagesRequest
@@ -123,6 +156,24 @@ public sealed record MessagesRequest
 
     [JsonPropertyName("metadata")]
     public Dictionary<string, object?>? Metadata { get; init; }
+
+    [JsonPropertyName("user")]
+    public string? User { get; init; }
+
+    [JsonPropertyName("previous_response_id")]
+    public string? PreviousResponseId { get; init; }
+
+    [JsonPropertyName("background")]
+    public bool? Background { get; init; }
+
+    [JsonPropertyName("store")]
+    public bool? Store { get; init; }
+
+    [JsonPropertyName("include")]
+    public List<string>? Include { get; init; }
+
+    [JsonPropertyName("truncation")]
+    public string? Truncation { get; init; }
 
     [JsonPropertyName("tools")]
     public List<Tool>? Tools { get; init; }

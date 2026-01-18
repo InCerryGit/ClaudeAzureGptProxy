@@ -7,13 +7,14 @@
       "launchBrowser": false,
       "applicationUrl": "http://localhost:5196",
       "environmentVariables": {
-        "ASPNETCORE_ENVIRONMENT": "Development",
-        "ANTHROPIC_AUTH_TOKEN": "<set-in-env>",
-        "BIG_MODEL": "<set-in-env>",
-        "SMALL_MODEL": "<set-in-env>",
-        "AZURE_OPENAI_ENDPOINT": "<set-in-env>",
-        "AZURE_OPENAI_API_KEY": "<set-in-env>",
-        "AZURE_API_VERSION": "<set-in-env>"
+        "ASPNETCORE_ENVIRONMENT": "Development"
+//      ,
+//        "ANTHROPIC_AUTH_TOKEN": "<set-in-env>",
+//        "BIG_MODEL": "<set-in-env>",
+//        "SMALL_MODEL": "<set-in-env>",
+//        "AZURE_OPENAI_ENDPOINT": "<set-in-env>",
+//        "AZURE_OPENAI_API_KEY": "<set-in-env>",
+//        "AZURE_API_VERSION": "<set-in-env>"
       }
     }
   }

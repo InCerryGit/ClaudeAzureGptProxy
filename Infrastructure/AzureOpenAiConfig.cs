@@ -11,6 +11,7 @@ public sealed class AzureOpenAiOptions
     public string? AuthToken { get; set; }
     public string? BigModel { get; set; }
     public string? SmallModel { get; set; }
+    public string? CursorAzureDeployment { get; set; }
 }
 
 public sealed class NormalizedAzureOpenAiOptions
@@ -20,6 +21,7 @@ public sealed class NormalizedAzureOpenAiOptions
     public string? AuthToken { get; set; }
     public string? BigModel { get; set; }
     public string? SmallModel { get; set; }
+    public string? CursorAzureDeployment { get; set; }
     public string? ResponsesEndpoint { get; set; }
 }
 
@@ -37,6 +39,7 @@ public static class AzureOpenAiConfig
             options.AuthToken = configuration["ANTHROPIC_AUTH_TOKEN"];
             options.BigModel = configuration["BIG_MODEL"];
             options.SmallModel = configuration["SMALL_MODEL"];
+            options.CursorAzureDeployment = configuration["CURSOR_AZURE_DEPLOYMENT"];
         });
 
         services.AddSingleton(provider =>
@@ -105,6 +108,7 @@ public static class AzureOpenAiConfig
             AuthToken = options.AuthToken,
             BigModel = options.BigModel,
             SmallModel = options.SmallModel,
+            CursorAzureDeployment = options.CursorAzureDeployment,
             ResponsesEndpoint = responsesEndpoint,
         };
     }

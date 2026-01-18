@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Linq;
 using ClaudeAzureGptProxy.Infrastructure;
 using ClaudeAzureGptProxy.Models;
 using Microsoft.Extensions.Logging;
@@ -36,7 +37,18 @@ public static class AnthropicConversion
                         typeProp.GetString() == "text" &&
                         itemElement.TryGetProperty("text", out var textProp))
                     {
-                        buffer.Add(textProp.GetString() ?? string.Empty);
+                        if (HasSystemMetadata(itemElement))
+                        {
+                            buffer.Add(itemElement.GetRawText());
+                        }
+                        else
+                        {
+                            buffer.Add(textProp.GetString() ?? string.Empty);
+                        }
+                    }
+                    else if (itemElement.ValueKind == JsonValueKind.Object)
+                    {
+                        buffer.Add(itemElement.GetRawText());
                     }
                 }
                 else if (item is Dictionary<string, object?> dict &&
@@ -44,7 +56,18 @@ public static class AnthropicConversion
                          string.Equals(typeObj?.ToString(), "text", StringComparison.OrdinalIgnoreCase) &&
                          dict.TryGetValue("text", out var textObj))
                 {
-                    buffer.Add(textObj?.ToString() ?? string.Empty);
+                    if (HasSystemMetadata(dict))
+                    {
+                        buffer.Add(JsonSerializer.Serialize(dict));
+                    }
+                    else
+                    {
+                        buffer.Add(textObj?.ToString() ?? string.Empty);
+                    }
+                }
+                else if (item is Dictionary<string, object?> otherDict)
+                {
+                    buffer.Add(JsonSerializer.Serialize(otherDict));
                 }
             }
 
@@ -53,6 +76,22 @@ public static class AnthropicConversion
         }
 
         return null;
+    }
+
+    private static bool HasSystemMetadata(JsonElement element)
+    {
+        if (element.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+
+        return element.TryGetProperty("cache_control", out _) ||
+               element.TryGetProperty("citations", out _);
+    }
+
+    private static bool HasSystemMetadata(Dictionary<string, object?> dict)
+    {
+        return dict.ContainsKey("cache_control") || dict.ContainsKey("citations");
     }
 
     internal static string StripProviderPrefix(string model)
@@ -169,7 +208,7 @@ public static class AnthropicConversion
             }
         }
 
-        foreach (var message in request.Messages)
+        foreach (var message in MergeMessages(request.Messages))
         {
             if (message.Content is string textContent)
             {
@@ -259,6 +298,45 @@ public static class AnthropicConversion
             var openAiTools = new List<Dictionary<string, object?>>();
             foreach (var tool in request.Tools)
             {
+                var toolType = string.IsNullOrWhiteSpace(tool.Type) ? "function" : tool.Type;
+
+                if (!string.Equals(toolType, "function", StringComparison.OrdinalIgnoreCase))
+                {
+                    var passthrough = new Dictionary<string, object?>
+                    {
+                        ["type"] = toolType
+                    };
+
+                    if (!string.IsNullOrWhiteSpace(tool.Name))
+                    {
+                        passthrough["name"] = tool.Name;
+                    }
+
+                    if (!string.IsNullOrWhiteSpace(tool.Description))
+                    {
+                        passthrough["description"] = tool.Description;
+                    }
+
+                    if (tool.InputSchema.Count > 0)
+                    {
+                        passthrough["parameters"] = tool.InputSchema;
+                    }
+
+                    if (tool.AdditionalProperties is not null)
+                    {
+                        foreach (var (key, value) in tool.AdditionalProperties)
+                        {
+                            if (!passthrough.ContainsKey(key))
+                            {
+                                passthrough[key] = value;
+                            }
+                        }
+                    }
+
+                    openAiTools.Add(passthrough);
+                    continue;
+                }
+
                 if (string.IsNullOrWhiteSpace(tool.Name))
                 {
                     throw new InvalidOperationException("Tool name is required.");
@@ -285,25 +363,218 @@ public static class AnthropicConversion
             {
                 "auto" => "auto",
                 "any" => "any",
+                "none" => "none",
                 "tool" when !string.IsNullOrWhiteSpace(request.ToolChoice.Name) =>
                     new Dictionary<string, object?>
                     {
-                        ["type"] = "function",
-                        ["function"] = new Dictionary<string, object?>
-                        {
-                            ["name"] = request.ToolChoice.Name
-                        }
+                        ["type"] = "tool",
+                        ["name"] = request.ToolChoice.Name
                     },
                 _ => "auto"
             };
+
+            if (request.ToolChoice.DisableParallelToolUse == true)
+            {
+                // OpenAI-style flag; only effective on Responses path.
+                azureRequest["parallel_tool_calls"] = false;
+            }
+        }
+
+        if (request.Metadata is not null)
+        {
+            azureRequest["metadata"] = request.Metadata;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.User))
+        {
+            azureRequest["user"] = request.User;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.PreviousResponseId))
+        {
+            azureRequest["previous_response_id"] = request.PreviousResponseId;
+        }
+
+        if (request.Background.HasValue)
+        {
+            azureRequest["background"] = request.Background.Value;
+        }
+
+        if (request.Store.HasValue)
+        {
+            azureRequest["store"] = request.Store.Value;
+        }
+        else if (request.Background == true)
+        {
+            // Responses background mode requires store=true.
+            azureRequest["store"] = true;
+        }
+
+        if (request.Include is { Count: > 0 })
+        {
+            azureRequest["include"] = request.Include;
+        }
+
+        if (!string.IsNullOrWhiteSpace(request.Truncation))
+        {
+            azureRequest["truncation"] = request.Truncation;
+        }
+
+        if (request.Thinking is not null && request.Thinking.IsEnabled())
+        {
+            if (modelName.Contains("gpt-5", StringComparison.OrdinalIgnoreCase) ||
+                modelName.Contains("o3", StringComparison.OrdinalIgnoreCase))
+            {
+                azureRequest["reasoning"] = new Dictionary<string, object?>
+                {
+                    ["effort"] = "medium"
+                };
+            }
         }
 
         return azureRequest;
     }
 
+    private static List<Message> MergeMessages(List<Message> messages)
+    {
+        var merged = new List<Message>();
+        foreach (var message in messages)
+        {
+            if (merged.Count == 0)
+            {
+                merged.Add(message);
+                continue;
+            }
+
+            var last = merged[^1];
+            if (!string.Equals(last.Role, message.Role, StringComparison.OrdinalIgnoreCase))
+            {
+                merged.Add(message);
+                continue;
+            }
+
+            var combinedContent = MergeMessageContent(last.Content, message.Content);
+            merged[^1] = last with { Content = combinedContent };
+        }
+
+        return merged;
+    }
+
+    private static object? MergeMessageContent(object? left, object? right)
+    {
+        if (left is null)
+        {
+            return right;
+        }
+
+        if (right is null)
+        {
+            return left;
+        }
+
+        if (left is string leftText && right is string rightText)
+        {
+            return string.Concat(leftText, "\n\n", rightText);
+        }
+
+        var blocks = new List<object>();
+        blocks.AddRange(ToContentBlocks(left));
+        blocks.AddRange(ToContentBlocks(right));
+        return blocks;
+    }
+
+    private static IEnumerable<object> ToContentBlocks(object content)
+    {
+        if (content is string text)
+        {
+            yield return new Dictionary<string, object?>
+            {
+                ["type"] = "text",
+                ["text"] = text
+            };
+            yield break;
+        }
+
+        if (content is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Array)
+            {
+                foreach (var item in element.EnumerateArray())
+                {
+                    yield return item;
+                }
+                yield break;
+            }
+
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                yield return element;
+                yield break;
+            }
+
+            if (element.ValueKind == JsonValueKind.String)
+            {
+                yield return new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = element.GetString() ?? string.Empty
+                };
+                yield break;
+            }
+        }
+
+        if (content is IEnumerable<object> list)
+        {
+            foreach (var item in list)
+            {
+                yield return item;
+            }
+            yield break;
+        }
+
+        yield return new Dictionary<string, object?>
+        {
+            ["type"] = "text",
+            ["text"] = content.ToString() ?? string.Empty
+        };
+    }
+
     private static void AppendUserContent(List<Dictionary<string, object?>> messages, IEnumerable<object> content)
     {
         var pendingText = string.Empty;
+        var contentBlocks = new List<Dictionary<string, object?>>();
+        var useBlocks = false;
+
+        void FlushUserTextToBlocks()
+        {
+            if (string.IsNullOrWhiteSpace(pendingText))
+            {
+                return;
+            }
+
+            contentBlocks.Add(new Dictionary<string, object?>
+            {
+                ["type"] = "text",
+                ["text"] = pendingText.Trim()
+            });
+
+            pendingText = string.Empty;
+        }
+
+        void FlushUserBlocks()
+        {
+            if (contentBlocks.Count == 0)
+            {
+                return;
+            }
+
+            messages.Add(new Dictionary<string, object?>
+            {
+                ["role"] = "user",
+                ["content"] = new List<Dictionary<string, object?>>(contentBlocks)
+            });
+            contentBlocks.Clear();
+        }
 
         void FlushUserText()
         {
@@ -342,35 +613,149 @@ public static class AnthropicConversion
                 case "text":
                 {
                     var textValue = ExtractTextValue(blockObj);
-                    pendingText += $"{textValue}\n";
+                    if (useBlocks)
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = textValue
+                        });
+                    }
+                    else
+                    {
+                        pendingText += $"{textValue}\n";
+                    }
                     break;
                 }
                 case "image":
-                    pendingText += "[Image content - not displayed in text format]\n";
+                    useBlocks = true;
+                    FlushUserTextToBlocks();
+                    if (TryConvertBlockToDictionary(blockObj, out var imageBlock))
+                    {
+                        contentBlocks.Add(imageBlock);
+                    }
+                    else
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = SerializeContentBlock(blockObj)
+                        });
+                    }
+                    break;
+                case "document":
+                    useBlocks = true;
+                    FlushUserTextToBlocks();
+                    if (TryConvertBlockToDictionary(blockObj, out var documentBlock))
+                    {
+                        contentBlocks.Add(documentBlock);
+                    }
+                    else
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = SerializeContentBlock(blockObj)
+                        });
+                    }
+                    break;
+                case "input_file":
+                case "file":
+                    useBlocks = true;
+                    FlushUserTextToBlocks();
+                    if (TryConvertBlockToDictionary(blockObj, out var fileBlock))
+                    {
+                        contentBlocks.Add(fileBlock);
+                    }
+                    else
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = SerializeContentBlock(blockObj)
+                        });
+                    }
+                    break;
+                case "search_result":
+                    useBlocks = true;
+                    FlushUserTextToBlocks();
+                    if (TryConvertBlockToDictionary(blockObj, out var searchBlock))
+                    {
+                        contentBlocks.Add(searchBlock);
+                    }
+                    else
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = SerializeContentBlock(blockObj)
+                        });
+                    }
                     break;
                 case "tool_result":
                 {
                     var toolUseId = ExtractString(blockObj, "tool_use_id") ?? string.Empty;
                     var resultContent = GetField(blockObj, "content");
-                    FlushUserText();
+                    var isError = ExtractBool(blockObj, "is_error");
+                    if (useBlocks)
+                    {
+                        FlushUserTextToBlocks();
+                        FlushUserBlocks();
+                    }
+                    else
+                    {
+                        FlushUserText();
+                    }
                     messages.Add(new Dictionary<string, object?>
                     {
                         ["role"] = "tool",
                         ["tool_call_id"] = toolUseId,
-                        ["content"] = ParseToolResultContent(resultContent)
+                        ["content"] = BuildToolResultPayload(resultContent, isError)
                     });
                     break;
                 }
                 case "tool_use":
                 {
-                    var toolName = ExtractString(blockObj, "name") ?? string.Empty;
-                    pendingText += $"[Tool use: {toolName}]\n";
+                    if (useBlocks)
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = SerializeContentBlock(blockObj)
+                        });
+                    }
+                    else
+                    {
+                        pendingText += $"{SerializeContentBlock(blockObj)}\n";
+                    }
                     break;
                 }
+                default:
+                    if (useBlocks)
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = SerializeContentBlock(blockObj)
+                        });
+                    }
+                    else
+                    {
+                        pendingText += $"{SerializeContentBlock(blockObj)}\n";
+                    }
+                    break;
             }
         }
 
-        FlushUserText();
+        if (useBlocks)
+        {
+            FlushUserTextToBlocks();
+            FlushUserBlocks();
+        }
+        else
+        {
+            FlushUserText();
+        }
     }
 
     private static void AppendAssistantContent(
@@ -379,6 +764,8 @@ public static class AnthropicConversion
         ILogger logger)
     {
         var assistantText = string.Empty;
+        var contentBlocks = new List<Dictionary<string, object?>>();
+        var useBlocks = false;
         var toolCalls = new List<Dictionary<string, object?>>();
 
         foreach (var block in content)
@@ -404,11 +791,27 @@ public static class AnthropicConversion
                 case "text":
                 {
                     var textValue = ExtractTextValue(blockObj);
-                    assistantText += $"{textValue}\n";
+                    if (useBlocks)
+                    {
+                        contentBlocks.Add(new Dictionary<string, object?>
+                        {
+                            ["type"] = "text",
+                            ["text"] = textValue
+                        });
+                    }
+                    else
+                    {
+                        assistantText += $"{textValue}\n";
+                    }
                     break;
                 }
                 case "image":
-                    assistantText += "[Image content - not displayed in text format]\n";
+                    useBlocks = true;
+                    contentBlocks.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "text",
+                        ["text"] = SerializeContentBlock(blockObj)
+                    });
                     break;
                 case "tool_use":
                 {
@@ -427,21 +830,53 @@ public static class AnthropicConversion
                             ["arguments"] = arguments
                         }
                     });
+                    useBlocks = true;
+                    contentBlocks.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "text",
+                        ["text"] = SerializeContentBlock(blockObj)
+                    });
                     break;
                 }
                 case "tool_result":
                 {
                     var resultContent = GetField(blockObj, "content");
-                    assistantText += $"{ParseToolResultContent(resultContent)}\n";
+                    useBlocks = true;
+                    contentBlocks.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "text",
+                        ["text"] = ParseToolResultContent(resultContent)
+                    });
                     break;
                 }
+                case "document":
+                case "search_result":
+                case "thinking":
+                case "redacted_thinking":
+                case "input_file":
+                case "file":
+                    useBlocks = true;
+                    contentBlocks.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "text",
+                        ["text"] = SerializeContentBlock(blockObj)
+                    });
+                    break;
+                default:
+                    useBlocks = true;
+                    contentBlocks.Add(new Dictionary<string, object?>
+                    {
+                        ["type"] = "text",
+                        ["text"] = SerializeContentBlock(blockObj)
+                    });
+                    break;
             }
         }
 
         var assistantMessage = new Dictionary<string, object?>
         {
             ["role"] = "assistant",
-            ["content"] = assistantText.Trim()
+            ["content"] = useBlocks ? contentBlocks : assistantText.Trim()
         };
 
         if (toolCalls.Count > 0)
@@ -624,61 +1059,16 @@ public static class AnthropicConversion
             IEnumerable<object> list => list,
             _ => Array.Empty<object>()
         };
-
-        var textBuffer = new List<string>();
-        var toolBlocks = new List<Dictionary<string, object?>>();
-
         foreach (var item in outputItems)
         {
-            var itemType = ExtractString(item, "type");
-
-            if (string.Equals(itemType, "message", StringComparison.OrdinalIgnoreCase))
-            {
-                var messageContent = GetField(item, "content");
-                ExtractResponsesMessageParts(messageContent, logger, textBuffer, toolBlocks);
-                continue;
-            }
-
-            if (string.Equals(itemType, "output_text", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(itemType, "text", StringComparison.OrdinalIgnoreCase))
-            {
-                var text = ExtractString(item, "text") ?? string.Empty;
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    textBuffer.Add(text);
-                }
-                continue;
-            }
-
-            if (string.Equals(itemType, "tool_call", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(itemType, "function_call", StringComparison.OrdinalIgnoreCase))
-            {
-                var toolBlock = BuildToolUseBlock(item, logger);
-                if (toolBlock is not null)
-                {
-                    toolBlocks.Add(toolBlock);
-                }
-            }
+            AppendResponsesOutputItem(item, logger, content);
         }
-
-        var combinedText = string.Join(string.Empty, textBuffer).Trim();
-        if (!string.IsNullOrWhiteSpace(combinedText))
-        {
-            content.Add(new Dictionary<string, object?>
-            {
-                ["type"] = "text",
-                ["text"] = combinedText
-            });
-        }
-
-        content.AddRange(toolBlocks);
     }
 
     private static void ExtractResponsesMessageParts(
         object? messageContent,
         ILogger logger,
-        List<string> textBuffer,
-        List<Dictionary<string, object?>> toolBlocks)
+        List<Dictionary<string, object?>> content)
     {
         if (messageContent is null)
         {
@@ -694,28 +1084,86 @@ public static class AnthropicConversion
 
         foreach (var part in parts)
         {
-            var partType = ExtractString(part, "type");
-            if (string.Equals(partType, "output_text", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(partType, "text", StringComparison.OrdinalIgnoreCase))
-            {
-                var text = ExtractString(part, "text") ?? string.Empty;
-                if (!string.IsNullOrWhiteSpace(text))
-                {
-                    textBuffer.Add(text);
-                }
-                continue;
-            }
-
-            if (string.Equals(partType, "tool_call", StringComparison.OrdinalIgnoreCase) ||
-                string.Equals(partType, "function_call", StringComparison.OrdinalIgnoreCase))
-            {
-                var toolBlock = BuildToolUseBlock(part, logger);
-                if (toolBlock is not null)
-                {
-                    toolBlocks.Add(toolBlock);
-                }
-            }
+            AppendResponsesOutputItem(part, logger, content);
         }
+    }
+
+    private static void AppendResponsesOutputItem(
+        object? item,
+        ILogger logger,
+        List<Dictionary<string, object?>> content)
+    {
+        if (item is null)
+        {
+            return;
+        }
+
+        var itemType = ExtractString(item, "type") ?? string.Empty;
+        if (string.Equals(itemType, "message", StringComparison.OrdinalIgnoreCase))
+        {
+            var messageContent = GetField(item, "content");
+            ExtractResponsesMessageParts(messageContent, logger, content);
+            return;
+        }
+
+        if (string.Equals(itemType, "output_text", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(itemType, "text", StringComparison.OrdinalIgnoreCase))
+        {
+            var text = ExtractString(item, "text") ?? string.Empty;
+            if (!string.IsNullOrWhiteSpace(text))
+            {
+                content.Add(new Dictionary<string, object?>
+                {
+                    ["type"] = "text",
+                    ["text"] = text
+                });
+            }
+            return;
+        }
+
+        if (string.Equals(itemType, "reasoning", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(itemType, "reasoning_text", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(itemType, "thinking", StringComparison.OrdinalIgnoreCase))
+        {
+            var thinkingText = ExtractString(item, "thinking") ?? ExtractString(item, "text") ?? JsonSerializer.Serialize(item);
+            content.Add(new Dictionary<string, object?>
+            {
+                ["type"] = "thinking",
+                ["thinking"] = thinkingText,
+                ["signature"] = ExtractString(item, "signature") ?? string.Empty
+            });
+            return;
+        }
+
+        if (string.Equals(itemType, "redacted_thinking", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(itemType, "redacted_reasoning", StringComparison.OrdinalIgnoreCase))
+        {
+            var data = ExtractString(item, "data") ?? ExtractString(item, "text") ?? JsonSerializer.Serialize(item);
+            content.Add(new Dictionary<string, object?>
+            {
+                ["type"] = "redacted_thinking",
+                ["data"] = data
+            });
+            return;
+        }
+
+        if (string.Equals(itemType, "tool_call", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(itemType, "function_call", StringComparison.OrdinalIgnoreCase))
+        {
+            var toolBlock = BuildToolUseBlock(item, logger);
+            if (toolBlock is not null)
+            {
+                content.Add(toolBlock);
+            }
+            return;
+        }
+
+        // Fallback: preserve unknown Responses output items as text to avoid data loss.
+        content.Add(new Dictionary<string, object?>
+        {
+            ["type"] = "text",
+            ["text"] = JsonSerializer.Serialize(item)
+        });
     }
 
     private static Dictionary<string, object?>? BuildToolUseBlock(object? toolCall, ILogger logger)
@@ -843,6 +1291,43 @@ public static class AnthropicConversion
         return null;
     }
 
+    private static bool? ExtractBool(object? obj, string property)
+    {
+        if (obj is JsonElement element && element.ValueKind == JsonValueKind.Object &&
+            element.TryGetProperty(property, out var prop))
+        {
+            if (prop.ValueKind == JsonValueKind.True)
+            {
+                return true;
+            }
+
+            if (prop.ValueKind == JsonValueKind.False)
+            {
+                return false;
+            }
+
+            if (prop.ValueKind == JsonValueKind.String && bool.TryParse(prop.GetString(), out var parsed))
+            {
+                return parsed;
+            }
+        }
+
+        if (obj is IDictionary<string, object?> dict && dict.TryGetValue(property, out var value) && value is not null)
+        {
+            if (value is bool boolValue)
+            {
+                return boolValue;
+            }
+
+            if (bool.TryParse(value.ToString(), out var parsed))
+            {
+                return parsed;
+            }
+        }
+
+        return null;
+    }
+
     private static int ExtractInt(IDictionary<string, object?> dict, string property)
     {
         if (!dict.TryGetValue(property, out var value) || value is null)
@@ -964,6 +1449,7 @@ public static class AnthropicConversion
         if (content is IEnumerable<object> list)
         {
             var result = new List<string>();
+            var allTextBlocks = true;
             foreach (var item in list)
             {
                 if (item is JsonElement itemElement && itemElement.ValueKind == JsonValueKind.Object)
@@ -976,6 +1462,7 @@ public static class AnthropicConversion
                     }
                     else
                     {
+                        allTextBlocks = false;
                         result.Add(itemElement.GetRawText());
                     }
                 }
@@ -991,8 +1478,14 @@ public static class AnthropicConversion
                 }
                 else
                 {
+                    allTextBlocks = false;
                     result.Add(item?.ToString() ?? string.Empty);
                 }
+            }
+
+            if (!allTextBlocks)
+            {
+                return JsonSerializer.Serialize(list);
             }
 
             return string.Join("\n", result).Trim();
@@ -1011,5 +1504,93 @@ public static class AnthropicConversion
         }
 
         return content.ToString() ?? string.Empty;
+    }
+
+    private static string BuildToolResultPayload(object? content, bool? isError)
+    {
+        var parsed = ParseToolResultContent(content);
+        if (isError != true)
+        {
+            return parsed;
+        }
+
+        var payload = new Dictionary<string, object?>
+        {
+            ["is_error"] = true,
+            ["content"] = parsed
+        };
+
+        return JsonSerializer.Serialize(payload);
+    }
+
+    private static string SerializeContentBlock(object? blockObj)
+    {
+        if (blockObj is null)
+        {
+            return string.Empty;
+        }
+
+        if (blockObj is JsonElement element)
+        {
+            return element.ValueKind == JsonValueKind.String
+                ? element.GetString() ?? string.Empty
+                : element.GetRawText();
+        }
+
+        if (blockObj is string str)
+        {
+            return str;
+        }
+
+        if (blockObj is IDictionary<string, object?> dict)
+        {
+            return JsonSerializer.Serialize(dict);
+        }
+
+        return JsonSerializer.Serialize(blockObj);
+    }
+
+    private static bool TryConvertBlockToDictionary(object? blockObj, out Dictionary<string, object?> block)
+    {
+        block = new Dictionary<string, object?>();
+
+        if (blockObj is JsonElement element)
+        {
+            if (element.ValueKind == JsonValueKind.Object)
+            {
+                block = ConvertJsonObjectToDictionary(element);
+                return true;
+            }
+
+            return false;
+        }
+
+        if (blockObj is IDictionary<string, object?> dict)
+        {
+            block = new Dictionary<string, object?>(dict);
+            return true;
+        }
+
+        return false;
+    }
+
+    private static Dictionary<string, object?> ConvertJsonObjectToDictionary(JsonElement element)
+    {
+        var dict = new Dictionary<string, object?>();
+        foreach (var prop in element.EnumerateObject())
+        {
+            dict[prop.Name] = prop.Value.ValueKind switch
+            {
+                JsonValueKind.Object => ConvertJsonObjectToDictionary(prop.Value),
+                JsonValueKind.Array => prop.Value.EnumerateArray().Select(item => (object)item).ToList(),
+                JsonValueKind.String => prop.Value.GetString(),
+                JsonValueKind.Number => prop.Value.TryGetInt64(out var l) ? l : prop.Value.GetDouble(),
+                JsonValueKind.True => true,
+                JsonValueKind.False => false,
+                _ => null
+            };
+        }
+
+        return dict;
     }
 }
