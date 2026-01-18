@@ -139,7 +139,12 @@ public static class CursorRequestAdapter
                     }
 
                     writer.WritePropertyName("output");
-                    WriteContentAsTextOrJson(writer, m.Content);
+                    // IMPORTANT: Azure Responses expects function_call_output.output to be a string (docs example),
+                    // not an array of content parts. Cursor may send tool messages as an array like:
+                    //   [{"type":"text","text":"..."}]
+                    // If we forward that shape directly, Azure validates output[*].type and rejects "text".
+                    // To preserve information without violating schema, serialize non-string content to JSON.
+                    WriteToolOutputAsString(writer, m.Content);
 
                     writer.WriteEndObject();
                     continue;
@@ -415,5 +420,26 @@ public static class CursorRequestAdapter
         }
 
         content.WriteTo(writer);
+    }
+
+    private static void WriteToolOutputAsString(Utf8JsonWriter writer, JsonElement content)
+    {
+        // Match old python behavior: function_call_output.output is the tool output content.
+        // Azure Responses schema expects it as a string; if upstream provided structured JSON,
+        // keep it by serializing to a JSON string.
+        if (content.ValueKind == JsonValueKind.String)
+        {
+            writer.WriteStringValue(content.GetString() ?? string.Empty);
+            return;
+        }
+
+        if (content.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            writer.WriteStringValue(string.Empty);
+            return;
+        }
+
+        // Arrays/objects/numbers/bools: preserve as JSON text inside a string.
+        writer.WriteStringValue(content.GetRawText());
     }
 }
