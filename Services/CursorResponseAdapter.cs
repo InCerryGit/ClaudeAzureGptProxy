@@ -9,12 +9,18 @@ public sealed class CursorResponseAdapter
     private bool _sentRole;
     private bool _thinkOpen;
     private int _created;
+    private readonly string _completionId;
+    private int _toolCalls;
     private readonly Dictionary<string, string> _toolItemIdToCallId = new(StringComparer.Ordinal);
 
     public CursorResponseAdapter(string inboundModel)
     {
         _inboundModel = inboundModel;
         _created = (int)DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+        // Keep a stable id for the entire stream. Some clients (including Cursor) can misbehave
+        // if each delta chunk uses a new id.
+        _completionId = "chatcmpl-" + Guid.NewGuid().ToString("N");
+        _toolCalls = 0;
     }
 
     public IEnumerable<string> ConvertAzureSseDataToOpenAiSse(string azureData)
@@ -103,7 +109,7 @@ public sealed class CursorResponseAdapter
             if (!_thinkOpen)
             {
                 _thinkOpen = true;
-                yield return BuildChunk(content: "<think>\n\n", toolCalls: null, finishReason: null);
+                yield return BuildChunk(content: "<think>\n\n", toolCalls: null, finishReason: null, forceRole: true);
             }
             yield break;
         }
@@ -111,6 +117,8 @@ public sealed class CursorResponseAdapter
         if (string.Equals(itemType, "function_call", StringComparison.OrdinalIgnoreCase))
         {
             // OpenAI streaming tool_calls begins with an item carrying id/name and empty arguments.
+            // Align with old Python implementation: increment tool call index per new function_call.
+            _toolCalls++;
             var callId = item.TryGetProperty("call_id", out var cid) ? cid.GetString() : null;
             var itemId = item.TryGetProperty("id", out var iid) ? iid.GetString() : null;
             var name = item.TryGetProperty("name", out var nm) ? nm.GetString() : null;
@@ -139,7 +147,7 @@ public sealed class CursorResponseAdapter
             {
                 new
                 {
-                    index = 0,
+                    index = _toolCalls - 1,
                     id = callId,
                     type = "function",
                     function = new { name, arguments = string.Empty }
@@ -162,6 +170,8 @@ public sealed class CursorResponseAdapter
 
     private IEnumerable<string> HandleFunctionCallArgumentsDelta(JsonElement root)
     {
+        // Align with old Python implementation: tool_calls deltas often include role=assistant.
+        // We still keep the internal _sentRole flag to not repeat role unless needed.
         EnsureRoleSent();
 
         var callId = root.TryGetProperty("call_id", out var cid) ? cid.GetString() : null;
@@ -225,14 +235,15 @@ public sealed class CursorResponseAdapter
         {
             new
             {
-                index = 0,
+                index = Math.Max(0, _toolCalls - 1),
                 id = callId,
                 type = "function",
                 function = new { name = (string?)null, arguments = delta }
             }
         };
 
-        yield return BuildChunk(content: null, toolCalls: toolCalls, finishReason: null);
+        // Force role for tool_calls chunks to match Python adapter behavior and improve Cursor compatibility.
+        yield return BuildChunk(content: null, toolCalls: toolCalls, finishReason: null, forceRole: true);
     }
 
     private IEnumerable<string> EmitContentDelta(string text)
@@ -249,7 +260,7 @@ public sealed class CursorResponseAdapter
             yield break;
         }
 
-        yield return BuildChunk(content: text, toolCalls: null, finishReason: null);
+        yield return BuildChunk(content: text, toolCalls: null, finishReason: null, forceRole: true);
     }
 
     private IEnumerable<string> HandleCompleted(JsonElement root)
@@ -280,6 +291,7 @@ public sealed class CursorResponseAdapter
 
         // Send a final chunk with finish_reason to match typical chat.completions stream.
         yield return BuildChunk(content: null, toolCalls: null, finishReason: finish);
+        yield return BuildUsageChunk();
         yield return OpenAiSseEncoder.Done();
     }
 
@@ -300,18 +312,18 @@ public sealed class CursorResponseAdapter
         if (_thinkOpen)
         {
             _thinkOpen = false;
-            yield return BuildChunk(content: "</think>\n\n", toolCalls: null, finishReason: null);
+            yield return BuildChunk(content: "</think>\n\n", toolCalls: null, finishReason: null, forceRole: true);
         }
     }
 
-    private string BuildChunk(string? content, object? toolCalls, string? finishReason)
+    private string BuildChunk(string? content, object? toolCalls, string? finishReason, bool forceRole = false)
     {
         // Build per python: {id, object:"chat.completion.chunk", created, model, choices:[{index, delta, finish_reason}]}
         using var stream = new MemoryStream();
         using (var writer = new Utf8JsonWriter(stream))
         {
             writer.WriteStartObject();
-            writer.WriteString("id", "chatcmpl-" + Guid.NewGuid().ToString("N"));
+            writer.WriteString("id", _completionId);
             writer.WriteString("object", "chat.completion.chunk");
             writer.WriteNumber("created", _created);
             writer.WriteString("model", _inboundModel);
@@ -324,7 +336,7 @@ public sealed class CursorResponseAdapter
             writer.WritePropertyName("delta");
             writer.WriteStartObject();
 
-            if (!_sentRole)
+            if (forceRole || !_sentRole)
             {
                 writer.WriteString("role", "assistant");
                 _sentRole = true;
@@ -354,6 +366,38 @@ public sealed class CursorResponseAdapter
 
             writer.WriteEndObject();
             writer.WriteEndArray();
+            writer.WriteEndObject();
+        }
+
+        stream.Position = 0;
+        using var doc = JsonDocument.Parse(stream);
+        return OpenAiSseEncoder.EncodeJson(doc.RootElement);
+    }
+
+    private string BuildUsageChunk()
+    {
+        // Emit a final empty "usage" chunk (OpenAI-style) to help some clients finalize state.
+        // Cursor is sensitive to stream termination semantics.
+        using var stream = new MemoryStream();
+        using (var writer = new Utf8JsonWriter(stream))
+        {
+            writer.WriteStartObject();
+            writer.WriteString("id", _completionId);
+            writer.WriteString("object", "chat.completion.chunk");
+            writer.WriteNumber("created", _created);
+            writer.WriteString("model", _inboundModel);
+
+            writer.WritePropertyName("choices");
+            writer.WriteStartArray();
+            writer.WriteEndArray();
+
+            writer.WritePropertyName("usage");
+            writer.WriteStartObject();
+            writer.WriteNull("prompt_tokens");
+            writer.WriteNull("completion_tokens");
+            writer.WriteNull("total_tokens");
+            writer.WriteEndObject();
+
             writer.WriteEndObject();
         }
 

@@ -73,7 +73,8 @@ docker run -d --name claude-azure-gpt-proxy --env-file .env -p 8088:8080 claude-
 | `AZURE_OPENAI_ENDPOINT` | Azure OpenAI 资源端点（必填） |
 | `AZURE_OPENAI_API_KEY` | Azure OpenAI Key（必填） |
 | `AZURE_API_VERSION` | API 版本（如 `2024-10-21`）|
-| `ANTHROPIC_AUTH_TOKEN` | 若设置，则 `/v1/messages*` 需要 Bearer Token |
+| `ANTHROPIC_AUTH_TOKEN` | 若设置，则 `/v1/messages*` 以及 `/cursor/*`（除 `/cursor/health`）需要 Bearer Token |
+| `CURSOR_AZURE_DEPLOYMENT` | 提供 Cursor 端点（`/cursor/*`）转换 Azure Responses API 使用的部署名（必填，是 Azure 里的 Deployment name，不是模型名） |
 | `SMALL_MODEL` | 小模型部署名（默认用于 haiku）|
 | `BIG_MODEL` | 大模型部署名（默认用于 sonnet/opus）|
 
