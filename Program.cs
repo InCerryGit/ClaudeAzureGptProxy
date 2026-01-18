@@ -206,13 +206,19 @@ static async Task<IResult> HandleCursorChatCompletions(
         }
     }
 
+    if (logger.IsEnabled(LogLevel.Debug))
+    {
+        logger.LogDebug("cursor_responses_request_summary {Summary}", SummarizeResponsesInput(responsesBody));
+    }
+
     await using var azureStream = await proxy.SendStreamingAsync(responsesBody, cancellationToken);
     var adapter = new CursorResponseAdapter(inboundModel);
     var decoder = new SseDecoder();
 
     using var reader = new StreamReader(azureStream);
-    var debugSseCount = 0;
-    const int debugSseMax = 30; // 只打前 N 条，避免日志刷屏
+    var upstreamCount = 0;
+    var downstreamCount = 0;
+    const int debugSseMax = 300; // 调试时尽量完整输出
     while (!cancellationToken.IsCancellationRequested)
     {
         var line = await reader.ReadLineAsync(cancellationToken);
@@ -221,24 +227,25 @@ static async Task<IResult> HandleCursorChatCompletions(
             break;
         }
 
-        if (logger.IsEnabled(LogLevel.Debug) && debugSseCount < debugSseMax)
+        if (logger.IsEnabled(LogLevel.Debug) && upstreamCount < debugSseMax)
         {
             var singleLine = line.Replace("\r", "\\r", StringComparison.Ordinal)
                 .Replace("\n", "\\n", StringComparison.Ordinal);
-            logger.LogDebug("cursor_upstream_line[{Index}] {Line}", debugSseCount, singleLine);
+            logger.LogDebug("cursor_upstream_line[{Index}] {Line}", upstreamCount, singleLine);
+            upstreamCount++;
         }
 
         foreach (var data in decoder.PushLine(line))
         {
             foreach (var sse in adapter.ConvertAzureSseDataToOpenAiSse(data))
             {
-                if (logger.IsEnabled(LogLevel.Debug) && debugSseCount < debugSseMax)
+                if (logger.IsEnabled(LogLevel.Debug) && downstreamCount < debugSseMax)
                 {
                     // 记录下行 SSE（单行转义），用于诊断 Cursor "looping detected"。
                     var singleLine = sse.Replace("\r", "\\r", StringComparison.Ordinal)
                         .Replace("\n", "\\n", StringComparison.Ordinal);
-                    logger.LogDebug("cursor_downstream_sse[{Index}] {Sse}", debugSseCount, singleLine);
-                    debugSseCount++;
+                    logger.LogDebug("cursor_downstream_sse[{Index}] {Sse}", downstreamCount, singleLine);
+                    downstreamCount++;
                 }
 
                 await response.WriteAsync(sse, cancellationToken);
@@ -253,7 +260,10 @@ static async Task<IResult> HandleCursorChatCompletions(
 
     if (logger.IsEnabled(LogLevel.Debug))
     {
-        logger.LogDebug("cursor_downstream_sse_done wrote_done=true printed_first_n={N}", debugSseCount);
+        logger.LogDebug(
+            "cursor_downstream_sse_done wrote_done=true upstream_lines={Upstream} downstream_lines={Downstream}",
+            upstreamCount,
+            downstreamCount);
     }
 
     logger.LogInformation("/cursor/chat/completions stream finished inboundModel={InboundModel}", inboundModel);
@@ -362,6 +372,83 @@ static string Shorten(string value)
     }
 
     return value.Length <= maxLen ? value : value[..maxLen] + "...";
+}
+
+static string SummarizeResponsesInput(JsonDocument responsesBody)
+{
+    try
+    {
+        var root = responsesBody.RootElement;
+        if (!root.TryGetProperty("input", out var input) || input.ValueKind != JsonValueKind.Array)
+        {
+            return "input=missing";
+        }
+
+        var parts = new List<string>();
+        var index = 0;
+        foreach (var item in input.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                parts.Add($"[{index}]:{item.ValueKind}");
+                index++;
+                continue;
+            }
+
+            var role = item.TryGetProperty("role", out var roleProp) ? roleProp.GetString() : null;
+            if (item.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
+            {
+                var contentParts = new List<string>();
+                foreach (var c in content.EnumerateArray())
+                {
+                    if (c.ValueKind != JsonValueKind.Object)
+                    {
+                        contentParts.Add(c.ValueKind.ToString());
+                        continue;
+                    }
+
+                    var type = c.TryGetProperty("type", out var t) ? t.GetString() : null;
+                    if (string.Equals(type, "input_image", StringComparison.OrdinalIgnoreCase))
+                    {
+                        if (c.TryGetProperty("image_url", out var imgUrl) && imgUrl.ValueKind == JsonValueKind.String)
+                        {
+                            contentParts.Add($"input_image(url={Shorten(imgUrl.GetString() ?? string.Empty)})");
+                        }
+                        else
+                        {
+                            contentParts.Add("input_image");
+                        }
+                    }
+                    else if (!string.IsNullOrWhiteSpace(type))
+                    {
+                        contentParts.Add(type);
+                    }
+                    else
+                    {
+                        contentParts.Add("object");
+                    }
+                }
+
+                parts.Add($"[{index}]:role={role ?? "?"},content={string.Join("|", contentParts)}");
+            }
+            else if (item.TryGetProperty("type", out var itemType))
+            {
+                parts.Add($"[{index}]:type={itemType.GetString()}");
+            }
+            else
+            {
+                parts.Add($"[{index}]:object");
+            }
+
+            index++;
+        }
+
+        return string.Join("; ", parts);
+    }
+    catch
+    {
+        return "input=unavailable";
+    }
 }
 
 
