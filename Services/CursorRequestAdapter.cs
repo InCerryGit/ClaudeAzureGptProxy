@@ -233,9 +233,21 @@ public static class CursorRequestAdapter
                         ? textProp.GetString() ?? string.Empty
                         : string.Empty;
 
-                    var normalizedType = string.Equals(type, "text", StringComparison.OrdinalIgnoreCase)
-                        ? (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ? "output_text" : "input_text")
-                        : type!;
+                    // Azure OpenAI Responses does NOT accept "text" as a content part type.
+                    // Additionally, for items inside the top-level "input" array, the content parts must be
+                    // "input_*" for role=user and "output_*" for role=assistant.
+                    // Normalize:
+                    // - any incoming "text" -> "input_text" for user, "output_text" for assistant
+                    // - any incoming "input_text" on assistant -> "output_text" (prevents 400 like: input[*].output[*].type='text')
+                    // - any incoming "output_text" on user -> "input_text" (keep symmetric)
+                    var isAssistant = string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase);
+                    var normalizedType = type?.ToLowerInvariant() switch
+                    {
+                        "text" => isAssistant ? "output_text" : "input_text",
+                        "input_text" => isAssistant ? "output_text" : "input_text",
+                        "output_text" => isAssistant ? "output_text" : "input_text",
+                        _ => isAssistant ? "output_text" : "input_text"
+                    };
 
                     writer.WriteStartObject();
                     writer.WriteString("type", normalizedType);
