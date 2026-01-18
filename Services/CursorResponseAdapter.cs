@@ -72,7 +72,8 @@ public sealed class CursorResponseAdapter
                 yield break;
             }
 
-            if (string.Equals(type, "response.function_call.arguments.delta", StringComparison.OrdinalIgnoreCase))
+            if (string.Equals(type, "response.function_call.arguments.delta", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(type, "response.function_call_arguments.delta", StringComparison.OrdinalIgnoreCase))
             {
                 foreach (var s in HandleFunctionCallArgumentsDelta(root))
                 {
