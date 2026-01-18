@@ -127,17 +127,7 @@ public static class CursorRequestAdapter
                 writer.WriteStartObject();
                 writer.WriteString("role", role.ToLowerInvariant());
 
-                writer.WritePropertyName("content");
-                writer.WriteStartArray();
-                writer.WriteStartObject();
-
-                var contentType = string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ? "output_text" : "input_text";
-                writer.WriteString("type", contentType);
-                writer.WritePropertyName("text");
-                writer.WriteStringValue(ExtractContentText(m.Content));
-
-                writer.WriteEndObject();
-                writer.WriteEndArray();
+                WriteResponsesContent(writer, role, m.Content);
 
                 writer.WriteEndObject();
 
@@ -188,6 +178,86 @@ public static class CursorRequestAdapter
             writer.WriteBoolean("strict", false);
             writer.WriteEndObject();
         }
+        writer.WriteEndArray();
+    }
+
+    private static void WriteResponsesContent(Utf8JsonWriter writer, string role, JsonElement content)
+    {
+        writer.WritePropertyName("content");
+        writer.WriteStartArray();
+
+        var wrotePart = false;
+        if (content.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var part in content.EnumerateArray())
+            {
+                if (part.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                var type = part.TryGetProperty("type", out var typeProp) ? typeProp.GetString() : null;
+
+                if (string.Equals(type, "text", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(type, "input_text", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(type, "output_text", StringComparison.OrdinalIgnoreCase))
+                {
+                    var text = part.TryGetProperty("text", out var textProp)
+                        ? textProp.GetString() ?? string.Empty
+                        : string.Empty;
+
+                    var normalizedType = string.Equals(type, "text", StringComparison.OrdinalIgnoreCase)
+                        ? (string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ? "output_text" : "input_text")
+                        : type!;
+
+                    writer.WriteStartObject();
+                    writer.WriteString("type", normalizedType);
+                    writer.WriteString("text", text);
+                    writer.WriteEndObject();
+                    wrotePart = true;
+                    continue;
+                }
+
+                if (string.Equals(type, "image_url", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(type, "input_image", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(type, "image", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Responses API expects input_image with image_url or image_base64.
+                    writer.WriteStartObject();
+                    writer.WriteString("type", "input_image");
+
+                    if (part.TryGetProperty("image_url", out var imageUrl))
+                    {
+                        writer.WritePropertyName("image_url");
+                        imageUrl.WriteTo(writer);
+                    }
+                    else if (part.TryGetProperty("image_base64", out var imageBase64))
+                    {
+                        writer.WritePropertyName("image_base64");
+                        imageBase64.WriteTo(writer);
+                    }
+                    else if (part.TryGetProperty("url", out var url))
+                    {
+                        writer.WritePropertyName("image_url");
+                        url.WriteTo(writer);
+                    }
+
+                    writer.WriteEndObject();
+                    wrotePart = true;
+                }
+            }
+        }
+
+        if (!wrotePart)
+        {
+            // Fallback to plain text when content is a simple string or unsupported structure.
+            var contentType = string.Equals(role, "assistant", StringComparison.OrdinalIgnoreCase) ? "output_text" : "input_text";
+            writer.WriteStartObject();
+            writer.WriteString("type", contentType);
+            writer.WriteString("text", ExtractContentText(content));
+            writer.WriteEndObject();
+        }
+
         writer.WriteEndArray();
     }
 
