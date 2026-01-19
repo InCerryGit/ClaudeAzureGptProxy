@@ -92,6 +92,8 @@ docker run -d --name azuregptproxy --env-file .env -p 8088:8080 azuregptproxy:la
 | `ANTHROPIC_AUTH_TOKEN` | If set, `/v1/messages*` requires Bearer token |
 | `SMALL_MODEL` | Small model deployment name (default for haiku) |
 | `BIG_MODEL` | Large model deployment name (default for sonnet/opus) |
+| `SMALL_EFFORT` | Reasoning effort for `SMALL_MODEL` (minimal|low|medium|high; default: medium) |
+| `BIG_EFFORT` | Reasoning effort for `BIG_MODEL` (minimal|low|medium|high; default: medium) |
 
 ---
 

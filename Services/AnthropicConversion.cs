@@ -409,14 +409,66 @@ public static class AnthropicConversion
             if (modelName.Contains("gpt-5", StringComparison.OrdinalIgnoreCase) ||
                 modelName.Contains("o3", StringComparison.OrdinalIgnoreCase))
             {
+                var effort = ResolveReasoningEffort(azureOptions, deploymentName, logger);
                 azureRequest["reasoning"] = new Dictionary<string, object?>
                 {
-                    ["effort"] = "medium"
+                    ["effort"] = effort
                 };
             }
         }
 
         return azureRequest;
+    }
+
+    private static string ResolveReasoningEffort(
+        NormalizedAzureOpenAiOptions azureOptions,
+        string deploymentName,
+        ILogger logger)
+    {
+        var bigModel = azureOptions.BigModel?.Trim();
+        var smallModel = azureOptions.SmallModel?.Trim();
+
+        var effortCandidate = string.Equals(deploymentName, bigModel, StringComparison.OrdinalIgnoreCase)
+            ? azureOptions.BigEffort
+            : string.Equals(deploymentName, smallModel, StringComparison.OrdinalIgnoreCase)
+                ? azureOptions.SmallEffort
+                : null;
+
+        if (TryNormalizeReasoningEffort(effortCandidate, out var effort))
+        {
+            return effort;
+        }
+
+        if (!string.IsNullOrWhiteSpace(effortCandidate))
+        {
+            logger.LogWarning(
+                "Invalid reasoning effort '{Effort}'. Allowed: minimal|low|medium|high. Falling back to medium.",
+                effortCandidate);
+        }
+
+        return "medium";
+    }
+
+    private static bool TryNormalizeReasoningEffort(string? effort, out string normalized)
+    {
+        normalized = string.Empty;
+        if (string.IsNullOrWhiteSpace(effort))
+        {
+            return false;
+        }
+
+        var value = effort.Trim().ToLowerInvariant();
+        switch (value)
+        {
+            case "minimal":
+            case "low":
+            case "medium":
+            case "high":
+                normalized = value;
+                return true;
+            default:
+                return false;
+        }
     }
 
     private static List<Message> MergeMessages(List<Message> messages)

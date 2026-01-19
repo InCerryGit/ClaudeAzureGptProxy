@@ -20,6 +20,8 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
   - `AZURE_OPENAI_API_KEY`：Azure OpenAI 访问密钥
   - `AZURE_API_VERSION`：Azure OpenAI API 版本
   - `ANTHROPIC_AUTH_TOKEN`：用于校验 `Authorization: Bearer` 的入站请求
+  - `SMALL_EFFORT`：小模型 reasoning effort（minimal|low|medium|high；可选；默认 medium）
+  - `BIG_EFFORT`：大模型 reasoning effort（minimal|low|medium|high；可选；默认 medium）
 
 ## 架构概览
 

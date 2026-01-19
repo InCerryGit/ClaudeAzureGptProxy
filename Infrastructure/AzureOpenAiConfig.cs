@@ -11,6 +11,8 @@ public sealed class AzureOpenAiOptions
     public string? AuthToken { get; set; }
     public string? BigModel { get; set; }
     public string? SmallModel { get; set; }
+    public string? BigEffort { get; set; }
+    public string? SmallEffort { get; set; }
     public string? CursorAzureDeployment { get; set; }
 }
 
@@ -21,6 +23,8 @@ public sealed class NormalizedAzureOpenAiOptions
     public string? AuthToken { get; set; }
     public string? BigModel { get; set; }
     public string? SmallModel { get; set; }
+    public string? BigEffort { get; set; }
+    public string? SmallEffort { get; set; }
     public string? CursorAzureDeployment { get; set; }
     public string? ResponsesEndpoint { get; set; }
 }
@@ -39,6 +43,8 @@ public static class AzureOpenAiConfig
             options.AuthToken = configuration["ANTHROPIC_AUTH_TOKEN"];
             options.BigModel = configuration["BIG_MODEL"];
             options.SmallModel = configuration["SMALL_MODEL"];
+            options.BigEffort = configuration["BIG_EFFORT"];
+            options.SmallEffort = configuration["SMALL_EFFORT"];
             options.CursorAzureDeployment = configuration["CURSOR_AZURE_DEPLOYMENT"];
         });
 
@@ -62,6 +68,8 @@ public static class AzureOpenAiConfig
                 AuthToken = options.AuthToken,
                 BigModel = options.BigModel,
                 SmallModel = options.SmallModel,
+                BigEffort = options.BigEffort,
+                SmallEffort = options.SmallEffort,
                 ResponsesEndpoint = options.Endpoint,
             };
         }
@@ -77,6 +85,8 @@ public static class AzureOpenAiConfig
                 AuthToken = options.AuthToken,
                 BigModel = options.BigModel,
                 SmallModel = options.SmallModel,
+                BigEffort = options.BigEffort,
+                SmallEffort = options.SmallEffort,
                 ResponsesEndpoint = options.Endpoint,
             };
         }
@@ -108,6 +118,8 @@ public static class AzureOpenAiConfig
             AuthToken = options.AuthToken,
             BigModel = options.BigModel,
             SmallModel = options.SmallModel,
+            BigEffort = options.BigEffort,
+            SmallEffort = options.SmallEffort,
             CursorAzureDeployment = options.CursorAzureDeployment,
             ResponsesEndpoint = responsesEndpoint,
         };

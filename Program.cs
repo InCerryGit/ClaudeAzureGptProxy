@@ -27,12 +27,13 @@ var overrideLevels = logLevelSection.GetChildren()
     .Where(x => x.Level is not null)
     .ToArray();
 
-var logFilePath = Path.Combine(AppContext.BaseDirectory, "logs", "proxy-.log");
-var logDirectory = Path.GetDirectoryName(logFilePath);
-if (!string.IsNullOrWhiteSpace(logDirectory))
-{
-    Directory.CreateDirectory(logDirectory);
-}
+var logDirectory = Path.Combine(AppContext.BaseDirectory, "logs");
+Directory.CreateDirectory(logDirectory);
+
+const int retainedLogDays = 7;
+PruneOldLogFiles(logDirectory, retainedLogDays);
+
+var logFilePath = CreateStartupLogFilePath(logDirectory);
 
 var loggerConfiguration = new LoggerConfiguration()
     .MinimumLevel.Is(defaultLevel)
@@ -40,9 +41,9 @@ var loggerConfiguration = new LoggerConfiguration()
     .WriteTo.Console()
     .WriteTo.File(
         logFilePath,
-        rollingInterval: RollingInterval.Day,
-        retainedFileCountLimit: 7,
+        rollingInterval: RollingInterval.Infinite,
         fileSizeLimitBytes: 10 * 1024 * 1024,
+        rollOnFileSizeLimit: true,
         shared: true);
 
 foreach (var (key, level) in overrideLevels)
@@ -578,6 +579,49 @@ app.MapPost("/v1/messages/count_tokens", (
 });
 
 app.Run();
+
+static void PruneOldLogFiles(string logDirectory, int keepDays)
+{
+    if (keepDays <= 0)
+    {
+        return;
+    }
+
+    var cutoffUtc = DateTime.UtcNow.Date.AddDays(-keepDays);
+    foreach (var path in Directory.EnumerateFiles(logDirectory, "proxy-*.log", SearchOption.TopDirectoryOnly))
+    {
+        try
+        {
+            var lastWriteUtc = File.GetLastWriteTimeUtc(path);
+            if (lastWriteUtc < cutoffUtc)
+            {
+                File.Delete(path);
+            }
+        }
+        catch
+        {
+            // Best-effort cleanup; ignore failures.
+        }
+    }
+}
+
+static string CreateStartupLogFilePath(string logDirectory)
+{
+    var date = DateTimeOffset.Now.ToString("yyyyMMdd");
+    var baseName = $"proxy-{date}";
+
+    for (var i = 0; i < 1000; i++)
+    {
+        var candidate = Path.Combine(logDirectory, $"{baseName}-{i}.log");
+        if (!File.Exists(candidate))
+        {
+            return candidate;
+        }
+    }
+
+    // Fallback: very unlikely, but ensures we never fail startup.
+    return Path.Combine(logDirectory, $"{baseName}-{Guid.NewGuid():N}.log");
+}
 
 static LogEventLevel? MapLogLevel(string? value)
 {

@@ -93,6 +93,8 @@ docker run -d --name azuregptproxy --env-file .env -p 8088:8080 azuregptproxy:la
 | `CURSOR_AZURE_DEPLOYMENT` | 提供 Cursor 端点（`/cursor/*`）转换 Azure Responses API 使用的部署名（必填，是 Azure 里的 Deployment name，不是模型名） |
 | `SMALL_MODEL` | 小模型部署名（默认用于 haiku）|
 | `BIG_MODEL` | 大模型部署名（默认用于 sonnet/opus）|
+| `SMALL_EFFORT` | `SMALL_MODEL` 的 reasoning effort（minimal|low|medium|high；默认 medium；仅 `thinking` 启用且走推理模型时生效）|
+| `BIG_EFFORT` | `BIG_MODEL` 的 reasoning effort（minimal|low|medium|high；默认 medium；仅 `thinking` 启用且走推理模型时生效）|
 
 ---
 
