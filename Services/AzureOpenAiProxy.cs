@@ -46,7 +46,7 @@ public sealed class AzureOpenAiProxy
         var stopwatch = Stopwatch.StartNew();
         var payload = AnthropicConversion.ConvertAnthropicToAzure(request, _logger, _azureOptions);
         request.ResolvedAzureModel ??= payload["model"]?.ToString();
-        var isResponses = IsResponsesModel(payload) || HasMultimodalContent(payload);
+        var isResponses = ShouldUseResponses(request, payload);
         if (!isResponses)
         {
             NormalizeOpenAiMessages(payload);
@@ -109,7 +109,7 @@ public sealed class AzureOpenAiProxy
         var stopwatch = Stopwatch.StartNew();
         var payload = AnthropicConversion.ConvertAnthropicToAzure(request, _logger, _azureOptions);
         request.ResolvedAzureModel ??= payload["model"]?.ToString();
-        var isResponses = IsResponsesModel(payload) || HasMultimodalContent(payload);
+        var isResponses = ShouldUseResponses(request, payload);
         if (!isResponses)
         {
             NormalizeOpenAiMessages(payload);
@@ -1079,11 +1079,26 @@ public sealed class AzureOpenAiProxy
                 ? completion
                 : 0;
 
-        return new Dictionary<string, object?>
+        var result = new Dictionary<string, object?>
         {
             ["prompt_tokens"] = promptTokens,
             ["completion_tokens"] = completionTokens
         };
+
+        // Azure Responses may report cached token counts under usage.input_tokens_details.cached_tokens.
+        if (usage.TryGetProperty("input_tokens_details", out var inputDetails) &&
+            inputDetails.ValueKind == JsonValueKind.Object &&
+            inputDetails.TryGetProperty("cached_tokens", out var cachedTokensProp) &&
+            cachedTokensProp.ValueKind == JsonValueKind.Number &&
+            cachedTokensProp.TryGetInt32(out var cachedTokens))
+        {
+            result["input_tokens_details"] = new Dictionary<string, object?>
+            {
+                ["cached_tokens"] = cachedTokens
+            };
+        }
+
+        return result;
     }
 
     private static Dictionary<string, object?> BuildStreamingChunk(
@@ -2195,8 +2210,27 @@ public sealed class AzureOpenAiProxy
         return lowered is "image" or "input_image" or "document" or "input_document" or "input_file";
     }
 
-    private static bool IsResponsesModel(Dictionary<string, object?> payload)
+    private static bool ShouldUseResponses(MessagesRequest request, Dictionary<string, object?> payload)
     {
+        // Use Responses API when:
+        // - request uses Responses-only features (previous_response_id/background/store/include/truncation)
+        // - request contains multimodal content
+        // - model is known to be supported in Responses API (broad match; Azure validates deployments)
+
+        if (request.PreviousResponseId is not null ||
+            request.Background.HasValue ||
+            request.Store.HasValue ||
+            request.Include is { Count: > 0 } ||
+            !string.IsNullOrWhiteSpace(request.Truncation))
+        {
+            return true;
+        }
+
+        if (HasMultimodalContent(payload))
+        {
+            return true;
+        }
+
         if (!payload.TryGetValue("model", out var modelObj) || modelObj is not string modelText)
         {
             return false;
@@ -2204,7 +2238,13 @@ public sealed class AzureOpenAiProxy
 
         var normalized = NormalizeResponsesModel(modelText).ToLowerInvariant();
         return normalized.Contains("gpt-5", StringComparison.OrdinalIgnoreCase) ||
-               normalized.Contains("o3", StringComparison.OrdinalIgnoreCase);
+               normalized.Contains("gpt-4o", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("gpt-4.1", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("o1", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("o3", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("o4", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("computer-use-preview", StringComparison.OrdinalIgnoreCase) ||
+               normalized.Contains("gpt-image-1", StringComparison.OrdinalIgnoreCase);
     }
 
     private static Dictionary<string, object?> BuildStreamChunkFromAnthropic(MessagesResponse response)

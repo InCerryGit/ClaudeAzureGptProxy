@@ -298,49 +298,33 @@ public static class AnthropicConversion
             var openAiTools = new List<Dictionary<string, object?>>();
             foreach (var tool in request.Tools)
             {
-                var toolType = string.IsNullOrWhiteSpace(tool.Type) ? "function" : tool.Type;
-
-                if (!string.Equals(toolType, "function", StringComparison.OrdinalIgnoreCase))
-                {
-                    var passthrough = new Dictionary<string, object?>
-                    {
-                        ["type"] = toolType
-                    };
-
-                    if (!string.IsNullOrWhiteSpace(tool.Name))
-                    {
-                        passthrough["name"] = tool.Name;
-                    }
-
-                    if (!string.IsNullOrWhiteSpace(tool.Description))
-                    {
-                        passthrough["description"] = tool.Description;
-                    }
-
-                    if (tool.InputSchema.Count > 0)
-                    {
-                        passthrough["parameters"] = tool.InputSchema;
-                    }
-
-                    if (tool.AdditionalProperties is not null)
-                    {
-                        foreach (var (key, value) in tool.AdditionalProperties)
-                        {
-                            if (!passthrough.ContainsKey(key))
-                            {
-                                passthrough[key] = value;
-                            }
-                        }
-                    }
-
-                    openAiTools.Add(passthrough);
-                    continue;
-                }
-
                 if (string.IsNullOrWhiteSpace(tool.Name))
                 {
                     throw new InvalidOperationException("Tool name is required.");
                 }
+
+                // Azure (Chat Completions / Responses) primarily supports OpenAI-style function tools.
+                // Claude Code tools (e.g. bash_20250124, text_editor_20250429) come through as non-"function" tool types.
+                // To keep them usable, we always encode them as function tools and preserve the original tool type
+                // in the description for debugging/compat.
+                var toolType = string.IsNullOrWhiteSpace(tool.Type) ? "function" : tool.Type;
+                var description = tool.Description ?? string.Empty;
+                if (!string.Equals(toolType, "function", StringComparison.OrdinalIgnoreCase) &&
+                    !string.IsNullOrWhiteSpace(toolType))
+                {
+                    description = string.IsNullOrWhiteSpace(description)
+                        ? $"tool_type={toolType}"
+                        : $"{description}\n\n(tool_type={toolType})";
+                }
+
+                // If no schema is provided, allow any object input (best-effort).
+                object parameters = tool.InputSchema.Count > 0
+                    ? tool.InputSchema
+                    : new Dictionary<string, object?>
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = true
+                    };
 
                 openAiTools.Add(new Dictionary<string, object?>
                 {
@@ -348,8 +332,8 @@ public static class AnthropicConversion
                     ["function"] = new Dictionary<string, object?>
                     {
                         ["name"] = tool.Name,
-                        ["description"] = tool.Description ?? string.Empty,
-                        ["parameters"] = tool.InputSchema
+                        ["description"] = description,
+                        ["parameters"] = parameters
                     }
                 });
             }
@@ -1003,6 +987,55 @@ public static class AnthropicConversion
         return GetField(azureResponse, "output") is not null;
     }
 
+    private static bool ResponsesOutputContainsFunctionCall(object? output)
+    {
+        if (output is null)
+        {
+            return false;
+        }
+
+        IEnumerable<object> outputItems = output switch
+        {
+            JsonElement element when element.ValueKind == JsonValueKind.Array => EnumerateJsonArray(element),
+            IEnumerable<object> list => list,
+            _ => Array.Empty<object>()
+        };
+
+        foreach (var item in outputItems)
+        {
+            var itemType = ExtractString(item, "type") ?? string.Empty;
+            if (string.Equals(itemType, "function_call", StringComparison.OrdinalIgnoreCase) ||
+                string.Equals(itemType, "tool_call", StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            if (string.Equals(itemType, "message", StringComparison.OrdinalIgnoreCase))
+            {
+                var messageContent = GetField(item, "content");
+                IEnumerable<object> parts = messageContent switch
+                {
+                    JsonElement element when element.ValueKind == JsonValueKind.Array => EnumerateJsonArray(element),
+                    IEnumerable<object> list => list,
+                    _ => Array.Empty<object>()
+                };
+
+                foreach (var part in parts)
+                {
+                    var partType = ExtractString(part, "type") ?? string.Empty;
+                    if (string.Equals(partType, "function_call", StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(partType, "tool_call", StringComparison.OrdinalIgnoreCase))
+                    {
+                        return true;
+                    }
+                }
+            }
+        }
+
+        return false;
+    }
+
+
     private static MessagesResponse ConvertResponsesToAnthropic(
         object? azureResponse,
         MessagesRequest originalRequest,
@@ -1027,9 +1060,16 @@ public static class AnthropicConversion
         }
 
         var usageInfo = ExtractUsage(usage);
-        var stopReason = MapStopReason(ExtractString(azureResponse, "finish_reason") ??
-                                       ExtractString(azureResponse, "stop_reason") ??
-                                       ExtractString(azureResponse, "status"));
+
+        // Azure Responses often returns status="completed" even when the output contains function calls.
+        // For Anthropic compatibility we must surface this as stop_reason="tool_use".
+        var hasFunctionCall = ResponsesOutputContainsFunctionCall(output);
+        var finishOrStatus = ExtractString(azureResponse, "finish_reason") ??
+                             ExtractString(azureResponse, "stop_reason") ??
+                             (hasFunctionCall ? "tool_calls" : null) ??
+                             ExtractString(azureResponse, "status") ??
+                             "stop";
+        var stopReason = MapStopReason(finishOrStatus);
 
         return new MessagesResponse
         {
